@@ -50,7 +50,7 @@ double lambda = LAMBDA;
 const double OVERALL_MEAN = 0.261519;
 //const double STUDENT_LAMBDA_MULTIPLIER = 500;
 
-const int THREADCOUNT = 1;
+const int THREADCOUNT = 4;
 
 ofstream trainlogfile;
 ofstream lambdalogfile;
@@ -66,13 +66,12 @@ bool loggamma = false;
 map<int, int> studentMap;
 SparseMatI train;
 SparseMatD trainKC;
+MatrixD    trainKC_PCA;
 SparseMatD trainSubtracks;
 
 MatrixD U, Q;
-MatrixD KCBias;
-MatrixD KSBias;
+//MatrixD KCBias;
 MatrixD QuestionBias;
-MatrixD StudentBias;
 
 struct perThread
 {
@@ -185,6 +184,57 @@ void read_question_features(string filename)
 	}
 }
 
+//reads in the question features post-PCA
+void read_PCA_question_features(string filename)
+{
+	ifstream results;
+	results.open(filename.c_str());
+	
+	string line;
+	
+	std::getline(results,line);
+	string token;
+	istringstream ss(line);
+	std::getline(ss, token, ',');
+	int numQuestions = atoi(token.c_str());
+	std::getline(ss, token, ',');
+	int numFeatures = atoi(token.c_str());
+	
+	trainKC_PCA.resize(numQuestions, numFeatures);
+	
+	for(int i = 0; i < numQuestions; i++)
+	{
+		uint32_t c = 0;
+		std::getline(results,line);
+		//assume good line
+		istringstream ss(line);
+		
+		if( i == 2207 )
+		{
+			//question 2207 is missing
+			i++;
+		}
+		
+		while(std::getline(ss, token, ','))
+		{
+			if(token.length() == 0)
+				c++;
+			else
+			{
+				int r = atof(token.c_str());
+				if(r != 0)
+				{
+					trainKC_PCA(i,c) = r;
+				}
+				c++;
+			}
+		}
+		
+		if(i % 1000 == 0)
+			cout << "question: " << i << endl;
+	}
+}
+
 //read training data into train
 void read_results_file(string filename)
 {	
@@ -265,28 +315,13 @@ void SGD(float t_gamma, size_t startU, size_t numU, size_t startQ, size_t numQ, 
 			
 			answer = it.value(); 
 			
-			//get the current estimation error
-			//ksbias = trainKC.row(question).cwiseProduct(KSBias.row(user));
-			//double sum_ksbias = ksbias.sum() / sqrt(trainKC.row(question).sum());
+			/*double gg = (trainKC.row(question) * threadVars[ID].KMat * U.row(user).transpose())(0,0) / trainKC.row(question).sum();
 			
-			//using biases on each KC per student doesn't work, not enough data
-			//double sum_ksbias = (KSBias.row(user) * trainKC.row(question).transpose())(0,0) / sqrt(trainKC.row(question).sum());
-			//double sum_ksbias = 0;
-			//double sum_ksbias = (KSBias.row(user) * trainSubtracks.row(question).transpose())(0,0); //In this case each question has one subtrack, so sqrt( |K| ) = 1
-
-			/*if(fabs(sum_ksbias) > 10000)
-			{
-				cout << KSBias.row(user) << endl;
-			}*/
-			
-			//double est = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + StudentBias(0, user) + sum_ksbias;		
-			
-			
-			/*double gg = trainKC.row(question) * KMat * U.row(user).transpose();
+			cout << gg << endl;
 			if(std::isnan(gg))
 			{
 				cout << gg << endl << endl;
-				cout << trainKC.row(question) * KMat << endl << endl;
+				cout << trainKC.row(question) * threadVars[ID].KMat << endl << endl;
 				cout << U.row(user) << endl << endl;
 				cout << Q.row(question) << endl << endl;
 				cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n";
@@ -295,42 +330,30 @@ void SGD(float t_gamma, size_t startU, size_t numU, size_t startQ, size_t numQ, 
 			//cout << trainKC.row(question) * KMat << endl << endl;
 			//cout << trainKC.row(question) * KMat * U.row(user).transpose() << endl;
 			
-			//double est = (U.row(user) * Q.row(question).transpose() + trainKC.row(question) * KMat * U.row(user).transpose())(0,0) + QuestionBias(0, question) + StudentBias(0, user);
-			double est = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + threadVars[ID].overall_bias;
+			double est = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + threadVars[ID].overall_bias + (trainKC.row(question) * threadVars[ID].KMat * U.row(user).transpose())(0,0) / trainKC.row(question).sum();
 			double err = est - answer;
+			
+			//cout << est << endl << endl;
 			
 			squaredErr += err*err;
 			
-			//cout << endl << endl << endl << sqKCBias << endl;
-			//ksbias -= trainKC.row(question) * (t_gamma * (err + lambda * sum_ksbias));// / trainKC.row(question).sum();
-			//sum_ksbias -= (t_gamma * (err + lambda * sum_ksbias));
-			//cout << trainKC.row(question) * (t_gamma * (err + lambda * skcbias)) << endl << sqKCBias << endl;
 			U.row(user)     -= t_gamma * (err * Q.row(question) + lambda * U.row(user));
 			Q.row(question) -= t_gamma * (err * U.row(user) + lambda * Q.row(question));
 			QuestionBias(0, question) -= t_gamma * (err + lambda * QuestionBias(0,question));
-			//StudentBias(0, user) -= t_gamma * (err + lambda * STUDENT_LAMBDA_MULTIPLIER * StudentBias(0,user));
 			threadVars[ID].overall_bias -= t_gamma * (err + lambda * threadVars[ID].overall_bias);
 			
-			//MatrixD left = MatrixD((trainKC.row(question).transpose() * U.row(user))) * err;
-			//MatrixD right = (KMat * trainKC.row(question).sum()) * lambda;
-			//KMat -= left + right;
+			MatrixD left = MatrixD((trainKC.row(question).transpose() * U.row(user))) * err / trainKC.row(question).sum();
+			MatrixD right = (threadVars[ID].KMat) * lambda;
+			threadVars[ID].KMat -= left + right;
 			
-			//KSBias.row(user) += ksbias;
-			//cout << "update:" << KSBias.row(user).cols() << " " << (trainKC.row(question) * sum_ksbias).cols() << endl;
+			/*
+			cout << threadVars[ID].KMat.maxCoeff() << " " << threadVars[ID].KMat.minCoeff();
 			
-			//KSBias.row(user) += trainKC.row(question) * sum_ksbias;
-			
-			//MatrixD left = err * trainSubtracks.row(question);
-			//MatrixD right = lambda * trainSubtracks.row(question).cwiseProduct(KSBias.row(user));
-			//KSBias.row(user) -= (left + right);
-			
-			
-
+			std::string s;
+			std::getline(std::cin, s);
+			*/
 		}
 	}
-	//cout << KSBias.row(startU) << endl;
-	//int gg;
-	//cin >> gg;
 	//cout << squaredErr << endl;
 	//cout << "DONE\n" << endl;
 }
@@ -341,18 +364,12 @@ void training_harness()//, const blaze::CompressedMatrix<int8_t> &actual)
 	Q.resize(train.cols(),numFeatures);
 	//1 row by Q columns for QuestionBias
 	QuestionBias.resize(1, Q.rows());
-	//1 row by U columns for StudentBias
-	StudentBias.resize(1, U.rows());
 	//KCBias.resize(1, trainKC.cols());
-	//KSBias.resize(train.rows(), trainSubtracks.cols());
-	
 	
 	U = MatrixXd::Random(U.rows(), U.cols());
 	Q = MatrixXd::Random(Q.rows(), Q.cols());
 	QuestionBias = MatrixXd::Random(QuestionBias.rows(), QuestionBias.cols());
-	StudentBias = MatrixXd::Random(StudentBias.rows(), StudentBias.cols());
 	//KCBias = MatrixXd::Random(KCBias.rows(), KCBias.cols());
-	//KSBias = MatrixXd::Zero(KSBias.rows(), KSBias.cols());
 	
 	for(int c = 0; c < THREADCOUNT; c++)
 	{
@@ -373,7 +390,7 @@ void training_harness()//, const blaze::CompressedMatrix<int8_t> &actual)
 	map<size_t, size_t> u_strat;
 	
 	//iterations through the data
-	for(int c = 0; c < 200 * THREADCOUNT; c++)
+	for(int c = 0; c < 15 * THREADCOUNT; c++)
 	{
 		double t_gamma = _gamma / (1 + _gamma * c * _gammalearn );
 		
@@ -409,7 +426,7 @@ void training_harness()//, const blaze::CompressedMatrix<int8_t> &actual)
 		if(logtrain)
 			trainlogfile << c << "," << squaredErr << ",\n";
 			
-		if(c % 25 == 0)
+		//if(c % 25 == 0)
 		{
 			cout << "Iteration: " << c << endl;
 			cout << squaredErr << " " << t_gamma << endl;
@@ -449,10 +466,10 @@ void training_harness()//, const blaze::CompressedMatrix<int8_t> &actual)
 		
 		//cout << result << " " << user << " " << question << endl;
 
-		//double sum_ksbias = (KSBias.row(user) * trainSubtracks.row(question).transpose())(0,0);
-		//estimation = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + StudentBias(0, user) + sum_ksbias;
-		estimation = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + avgVars.overall_bias;
-		//estimation = (U.row(user) * Q.row(question).transpose() + trainKC.row(question) * KMat * U.row(user).transpose())(0,0) + QuestionBias(0, question) + StudentBias(0, user);
+		//estimation = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + avgVars.overall_bias;
+		
+		estimation = (U.row(user) * Q.row(question).transpose())(0,0) + QuestionBias(0, question) + avgVars.overall_bias + (trainKC.row(question) * avgVars.KMat * U.row(user).transpose())(0,0) / trainKC.row(question).sum();
+
 		if(result == 0)
 			result -= 1;
 		
@@ -477,9 +494,6 @@ void training_harness()//, const blaze::CompressedMatrix<int8_t> &actual)
 		
 	if(logfeats)
 		featurelogfile << correct / ( (double) total) << "," << SE << endl;
-
-
-	//cout << StudentBias << endl;
 
 	cout << "Final accuracy: " << correct / ( (double) total);
 	cout << endl << correct << " out of " << total << endl;
@@ -532,7 +546,29 @@ int main(int argc, char**argv)
 		ar << trainKC;
 	}
 	
+	if( FILE *file = fopen("../data/realKCmatsPCA_t.eigen", "r")) {
+		fclose(file);
+		try{
+			ifstream gg( "../data/realKCmatsPCA_t.eigen" );
+			boost::archive::text_iarchive ar( gg );
+			ar >> trainKC_PCA;
+		}catch(boost::archive::archive_exception e)
+		{
+			cout << "Archive Exception: " << e.what() << endl;
+			return 0;
+		}
+    }
+	else
+	{
+		read_question_features("../data/question_feature30.csv");
+		ofstream gg( "../data/realKCmatsPCA_t.eigen" );
+		boost::archive::text_oarchive ar( gg );
+		ar << trainKC_PCA;
+	}
+	
 	trainSubtracks = trainKC.block(0, 14, trainKC.rows(), 16);
+	//for now just try PCA
+	//trainKC = trainKC_PCA;
 	
 	cout << "DATA LOADED\n";
 	
@@ -594,11 +630,6 @@ int main(int argc, char**argv)
 	
 	
 	//dump biases to file
-	{
-		ofstream gg( "../data/user_bias_t.eigen" );
-		boost::archive::text_oarchive ar( gg );
-		ar << StudentBias;
-	}
 	{
 		ofstream gg( "../data/question_bias_t.eigen" );
 		boost::archive::text_oarchive ar( gg );
